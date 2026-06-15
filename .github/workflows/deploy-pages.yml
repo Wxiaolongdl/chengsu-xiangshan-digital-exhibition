@@ -23,11 +23,23 @@ jobs:
     steps:
       - name: Configure Pages
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
-      - name: Download verified website package
-        run: curl -L --fail --retry 5 -o site-package.png "https://cdnmf.picsart.com/cloud-storage/f51cb574-593c-4c26-92f8-4339fb2230b5.png"
+      - name: Download verified website package parts
+        run: |
+          urls=(
+            "https://cdnmf.picsart.com/cloud-storage/76415a9c-1d0e-4161-bb63-4f4f6b9dde51.png"
+            "https://cdnmf.picsart.com/cloud-storage/a44197e2-3e58-4dbb-84db-8774f9c35988.png"
+            "https://cdnmf.picsart.com/cloud-storage/5c3a1d13-24a4-447b-b5d6-ffa088191dc0.png"
+            "https://cdnmf.picsart.com/cloud-storage/32ec1728-51e4-4c22-97f9-32f86a9434d9.png"
+            "https://cdnmf.picsart.com/cloud-storage/b88cf072-da03-476a-8acd-f2515e0258df.png"
+            "https://cdnmf.picsart.com/cloud-storage/f6a43020-94a4-495d-b303-792f85bc57d5.png"
+            "https://cdnmf.picsart.com/cloud-storage/329ed3fb-12e0-439e-bde2-3c59aff6b459.png"
+            "https://cdnmf.picsart.com/cloud-storage/91c7b5e7-bc12-4bea-bddf-5a81956f7d71.png"
+            "https://cdnmf.picsart.com/cloud-storage/1b8f2c96-f54d-49f3-84d1-189f69c059fa.png"
+          )
+          for index in "${!urls[@]}"; do
+            curl -L --fail --retry 5 -o "part-$index.png" "${urls[$index]}"
+          done
 
       - name: Extract website files
         shell: python
@@ -38,61 +50,65 @@ jobs:
           import zlib
           from pathlib import Path
 
-          png = Path("site-package.png").read_bytes()
-          position = 8
-          compressed = b""
-          width = height = None
+          def decode_png_payload(path):
+              png = Path(path).read_bytes()
+              position = 8
+              compressed = b""
+              width = height = None
+              while position < len(png):
+                  length = struct.unpack(">I", png[position:position + 4])[0]
+                  kind = png[position + 4:position + 8]
+                  data = png[position + 8:position + 8 + length]
+                  position += 12 + length
+                  if kind == b"IHDR":
+                      width, height, depth, color, _, _, _ = struct.unpack(">IIBBBBB", data)
+                      if depth != 8 or color != 2:
+                          raise ValueError("Unexpected package image format")
+                  elif kind == b"IDAT":
+                      compressed += data
+                  elif kind == b"IEND":
+                      break
 
-          while position < len(png):
-              length = struct.unpack(">I", png[position:position + 4])[0]
-              kind = png[position + 4:position + 8]
-              data = png[position + 8:position + 8 + length]
-              position += 12 + length
-              if kind == b"IHDR":
-                  width, height, depth, color, _, _, _ = struct.unpack(">IIBBBBB", data)
-                  if depth != 8 or color != 2:
-                      raise ValueError("Unexpected package image format")
-              elif kind == b"IDAT":
-                  compressed += data
-              elif kind == b"IEND":
-                  break
+              decoded = zlib.decompress(compressed)
+              stride = width * 3
+              rows = []
+              previous = bytearray(stride)
+              offset = 0
+              for _ in range(height):
+                  filter_type = decoded[offset]
+                  offset += 1
+                  current = bytearray(decoded[offset:offset + stride])
+                  offset += stride
+                  for index in range(stride):
+                      left = current[index - 3] if index >= 3 else 0
+                      above = previous[index]
+                      upper_left = previous[index - 3] if index >= 3 else 0
+                      if filter_type == 1:
+                          current[index] = (current[index] + left) & 255
+                      elif filter_type == 2:
+                          current[index] = (current[index] + above) & 255
+                      elif filter_type == 3:
+                          current[index] = (current[index] + ((left + above) // 2)) & 255
+                      elif filter_type == 4:
+                          estimate = left + above - upper_left
+                          distances = (abs(estimate - left), abs(estimate - above), abs(estimate - upper_left))
+                          predictor = (left, above, upper_left)[distances.index(min(distances))]
+                          current[index] = (current[index] + predictor) & 255
+                      elif filter_type != 0:
+                          raise ValueError(f"Unsupported PNG filter: {filter_type}")
+                  rows.append(bytes(current))
+                  previous = current
 
-          decoded = zlib.decompress(compressed)
-          stride = width * 3
-          rows = []
-          previous = bytearray(stride)
-          offset = 0
+              payload = b"".join(rows)
+              length = struct.unpack(">I", payload[:4])[0]
+              return payload[4:4 + length]
 
-          for _ in range(height):
-              filter_type = decoded[offset]
-              offset += 1
-              current = bytearray(decoded[offset:offset + stride])
-              offset += stride
-              for index in range(stride):
-                  left = current[index - 3] if index >= 3 else 0
-                  above = previous[index]
-                  upper_left = previous[index - 3] if index >= 3 else 0
-                  if filter_type == 1:
-                      current[index] = (current[index] + left) & 255
-                  elif filter_type == 2:
-                      current[index] = (current[index] + above) & 255
-                  elif filter_type == 3:
-                      current[index] = (current[index] + ((left + above) // 2)) & 255
-                  elif filter_type == 4:
-                      estimate = left + above - upper_left
-                      distances = (abs(estimate - left), abs(estimate - above), abs(estimate - upper_left))
-                      predictor = (left, above, upper_left)[distances.index(min(distances))]
-                      current[index] = (current[index] + predictor) & 255
-                  elif filter_type != 0:
-                      raise ValueError(f"Unsupported PNG filter: {filter_type}")
-              rows.append(bytes(current))
-              previous = current
-
-          payload = b"".join(rows)
-          zip_length = struct.unpack(">I", payload[:4])[0]
+          package_png = b"".join(decode_png_payload(f"part-{index}.png") for index in range(9))
+          Path("site-package.png").write_bytes(package_png)
+          zip_data = decode_png_payload("site-package.png")
           output = Path("site")
           output.mkdir()
-          with zipfile.ZipFile(io.BytesIO(payload[4:4 + zip_length])) as archive:
+          with zipfile.ZipFile(io.BytesIO(zip_data)) as archive:
               archive.extractall(output)
           (output / ".nojekyll").touch()
 
